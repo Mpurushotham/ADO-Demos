@@ -1,0 +1,56 @@
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  dockerRegistryServiceConnection: '<your-docker-service-connection>'
+  imageRepository: 'your-app'
+  containerRegistry: '<your-registry>.azurecr.io'
+  dockerfilePath: 'infra/Dockerfile'
+  tag: '$(Build.BuildId)'
+
+stages:
+- stage: Build
+  jobs:
+  - job: DockerBuild
+    steps:
+    - checkout: self
+    - task: Docker@2
+      inputs:
+        command: buildAndPush
+        containerRegistry: $(dockerRegistryServiceConnection)
+        repository: $(imageRepository)
+        dockerfile: $(dockerfilePath)
+        tags: |
+          $(tag)
+
+- stage: SecurityScan
+  jobs:
+  - job: Scan
+    steps:
+    - script: |
+        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
+        ./trivy image --exit-code 1 --severity HIGH,CRITICAL $(containerRegistry)/$(imageRepository):$(tag)
+      displayName: 'Run Trivy Image Scan'
+    - script: |
+        pip install checkov
+        checkov -d infra/
+      displayName: 'Run Checkov IaC Scan'
+
+- stage: DeployAKS
+  dependsOn: [Build, SecurityScan]
+  condition: succeeded()
+  jobs:
+  - job: Deploy
+    steps:
+    - task: Kubernetes@1
+      inputs:
+        connectionType: 'Azure Resource Manager'
+        azureSubscription: '<your-service-connection>'
+        azureResourceGroup: '<your-resource-group>'
+        kubernetesCluster: '<your-aks-cluster>'
+        command: 'apply'
+        useConfigurationFile: true
+        configuration: 'infra/k8s-deployment.yaml'
